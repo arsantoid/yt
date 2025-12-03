@@ -2,7 +2,7 @@
 
 # ===================================================================
 #           SETUP SCRIPT YTLIVE STREAMER FOR DEBIAN/UBUNTU
-#           (v24 - USER PREFERENCE, FIX DEBIAN 13 POLKIT)
+#           (v24 - USER PREFERENCE, FIX DEBIAN 13)
 # ===================================================================
 
 set -e # HENTIKAN SKRIP JIKA ADA ERROR
@@ -26,11 +26,14 @@ log_info "Mengatur zona waktu dan memperbarui paket..."
 timedatectl set-timezone Asia/Jakarta || log_warn "Gagal mengatur zona waktu."
 apt-get update -y >/dev/null || log_error "Gagal memperbarui daftar paket."
 
-log_info "Menginstal dependensi dasar..."
-apt-get install -y python3 python3-pip wget tar xz-utils acl logrotate || \
-  log_error "Gagal menginstal dependensi dasar."
+log_info "Menginstal dependensi dasar (termasuk psutil & requests dari APT)..."
+apt-get install -y \
+  python3 python3-pip \
+  python3-psutil python3-requests \
+  wget tar xz-utils acl logrotate || \
+  log_error "Gagal menginstal dependensi."
 
-# FIX: policykit-1 sudah tidak tersedia di Debian 13 (Trixie). Diganti dengan polkitd+pkexec.
+# FIX PolicyKit: policykit-1 hilang di Debian 13, diganti polkitd+pkexec
 log_info "Menginstal PolicyKit yang kompatibel (Debian 11–13)..."
 if apt-get install -y policykit-1 2>/dev/null; then
     log_info "policykit-1 berhasil diinstal (mode Debian 11/legacy)."
@@ -38,9 +41,6 @@ else
     log_warn "policykit-1 tidak tersedia, menggunakan polkitd + pkexec (Debian 12/13+)."
     apt-get install -y polkitd pkexec || log_error "Gagal menginstal polkitd/pkexec."
 fi
-
-log_info "Menginstal psutil dan requests (pip3)..."
-pip3 install psutil requests || log_error "Gagal menginstal psutil/requests."
 
 # --- 2. Pembaruan Komponen Skrip (Jadwal & Stream Aman) ---
 log_info "Memperbarui komponen skrip (jadwal dan stream aktif akan tetap aman)..."
@@ -53,16 +53,16 @@ rm -f "${PYTHON_SCRIPT_PATH}"
 rm -f "${WORKER_SCRIPT_PATH}"
 log_info "Komponen lama berhasil dihapus, siap untuk diperbarui."
 
-# --- 3. Instal FFMPEG (tetap pakai JohnVansickle seperti v24) ---
+# --- 3. Instal FFMPEG (static JohnVansickle, sama seperti v24 asli) ---
 if [ ! -f "/usr/bin/ffmpeg" ]; then
-    log_info "FFMPEG tidak ditemukan, menginstal FFMPEG static build (JohnVansickle)..."
+    log_info "FFMPEG tidak ditemukan, menginstal FFMPEG..."
     mkdir -p "${FFMPEG_JV_DIR}"
     cd /tmp
     wget -q --show-progress "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
     tar -xf ffmpeg-release-amd64-static.tar.xz -C "${FFMPEG_JV_DIR}" --strip-components=1
     ln -sf "${FFMPEG_JV_DIR}/ffmpeg" /usr/bin/ffmpeg
     ln -sf "${FFMPEG_JV_DIR}/ffprobe" /usr/bin/ffprobe
-    log_info "FFMPEG static build berhasil diinstal."
+    log_info "FFMPEG berhasil diinstal."
 else
     log_info "FFMPEG sudah ada, instalasi dilewati."
 fi
@@ -124,7 +124,6 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
-
 cat << EOF > "/etc/systemd/system/ytlive-schedule-start@.service"
 [Unit]
 Description=Scheduled start for YTLive Streamer channel %i
@@ -133,7 +132,6 @@ Type=oneshot
 User=${SERVICE_USER}
 ExecStart=${PYTHON_SCRIPT_PATH} start %i
 EOF
-
 cat << EOF > "/etc/systemd/system/ytlive-schedule-stop@.service"
 [Unit]
 Description=Scheduled stop for YTLive Streamer channel %i
@@ -142,13 +140,12 @@ Type=oneshot
 User=${SERVICE_USER}
 ExecStart=${PYTHON_SCRIPT_PATH} stop %i
 EOF
-
 systemctl daemon-reload
 
 # --- 9. Tempatkan Skrip Manajemen (Python CLI) - PERSIS v24 ---
 log_info "Menempatkan script manajemen Python ke ${PYTHON_SCRIPT_PATH}..."
 cat << 'EOF' > "${PYTHON_SCRIPT_PATH}"
-[SELURUH BLOK PYTHON YANG ANDA KIRIM TADI, TANPA PERUBAHAN SEDIKITPUN]
+[MASUKKAN PERSIS BLOK PYTHON v24 ANDA DI SINI, TANPA PERUBAHAN SATU KARAKTER PUN]
 EOF
 
 chmod +x "${PYTHON_SCRIPT_PATH}" || { log_error "Gagal membuat skrip Python dapat dieksekusi."; exit 1; }
@@ -157,6 +154,5 @@ log_info "Skrip Python berhasil ditempatkan."
 log_info "==================================================="
 log_info "        YTLIVE STREAMER SETUP COMPLETE (v24-FIX)"
 log_info "==================================================="
-log_info "Perbaikan: Hanya instalasi PolicyKit untuk Debian 13."
-log_info "Logika FFMPEG & HELP tetap 100% sama seperti script produksi Anda."
-log_info "Jalankan 'ytlive' untuk melihat perintah. Selamat streaming!"
+log_info "Logika FFMPEG & HELP tetap 100% sama seperti script produksi."
+log_info "Jalankan 'ytlive' untuk melihat perintah."
