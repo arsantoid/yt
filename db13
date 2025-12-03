@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ===================================================================
-#      SETUP SCRIPT YTLIVE STREAMER (v26 - CLEAN LOGS & DEBIAN 13 FIX)
+#      SETUP SCRIPT YTLIVE STREAMER (v27 - ANTI SEGFAULT & DEBIAN 13)
 # ===================================================================
 
 set -e # HENTIKAN SKRIP JIKA ADA ERROR
@@ -48,18 +48,23 @@ rm -f "${PYTHON_SCRIPT_PATH}"
 rm -f "${WORKER_SCRIPT_PATH}"
 log_info "Komponen lama berhasil dihapus."
 
-# --- 3. Instal FFMPEG ---
-if [ ! -f "/usr/bin/ffmpeg" ]; then
-    log_info "FFMPEG tidak ditemukan, menginstal FFMPEG..."
-    mkdir -p "${FFMPEG_JV_DIR}"
-    cd /tmp
-    wget -q --show-progress "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
-    tar -xf ffmpeg-release-amd64-static.tar.xz -C "${FFMPEG_JV_DIR}" --strip-components=1
+# --- 3. Instal FFMPEG (Prioritas APT agar Stabil) ---
+log_info "Mencoba menginstal FFMPEG stabil dari repository Debian..."
+if apt-get install -y ffmpeg; then
+    log_info "FFMPEG berhasil diinstal dari APT (Versi Stabil)."
+    FFMPEG_BIN="/usr/bin/ffmpeg"
+else
+    log_warn "FFMPEG APT gagal, mencoba instalasi Static Build (Fallback)..."
+    if [ ! -f "${FFMPEG_JV_DIR}/ffmpeg" ]; then
+        mkdir -p "${FFMPEG_JV_DIR}"
+        cd /tmp
+        wget -q --show-progress "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+        tar -xf ffmpeg-release-amd64-static.tar.xz -C "${FFMPEG_JV_DIR}" --strip-components=1
+    fi
     ln -sf "${FFMPEG_JV_DIR}/ffmpeg" /usr/bin/ffmpeg
     ln -sf "${FFMPEG_JV_DIR}/ffprobe" /usr/bin/ffprobe
-    log_info "FFMPEG berhasil diinstal."
-else
-    log_info "FFMPEG sudah ada, instalasi dilewati."
+    FFMPEG_BIN="/usr/bin/ffmpeg"
+    log_info "FFMPEG Static Build berhasil diinstal."
 fi
 
 # --- 4. Buat Direktori & Pengguna ---
@@ -107,13 +112,16 @@ log_info "Membuat template service Systemd..."
 cat << EOF > "/etc/systemd/system/ytlive-stream@.service"
 [Unit]
 Description=YTLive Streamer for %i
+# Restart lebih agresif jika crash (segfault)
+StartLimitIntervalSec=500
+StartLimitBurst=5
 [Service]
 User=${SERVICE_USER}
 Group=${SERVICE_GROUP}
 WorkingDirectory=${CHANNELS_BASE_DIR}/%i
 ExecStart=${WORKER_SCRIPT_PATH} %i
 Restart=always
-RestartSec=10
+RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -135,8 +143,8 @@ ExecStart=${PYTHON_SCRIPT_PATH} stop %i
 EOF
 systemctl daemon-reload
 
-# --- 9. Tempatkan Skrip Manajemen (Python CLI) - FINAL v26 ---
-log_info "Menempatkan script manajemen Python (v26 - Clean Logs)..."
+# --- 9. Tempatkan Skrip Manajemen (Python CLI) - FINAL v27 ---
+log_info "Menempatkan script manajemen Python (v27 - Anti Segfault)..."
 cat << 'EOF' > "${PYTHON_SCRIPT_PATH}"
 #!/usr/bin/env python3
 import os
@@ -207,13 +215,16 @@ def _build_ffmpeg_command(paths, mode):
     video = videos[(day_of_year - 1) % len(videos)]
 
     # Base Command (Input)
+    # Tambahkan -re (read input at native frame rate)
+    # Tambahkan -fflags +genpts untuk fix timestamp
     cmd_list = [FFMPEG_PATH, "-re", "-fflags", "+genpts", "-stream_loop", "-1", "-i", str(video)]
     
     # Output Options (TANPA maxrate/bufsize agar tidak warning di mode copy)
     common_out_opts = ["-f", "flv", f"{YOUTUBE_RTMP_URL}/{key}"]
 
     if mode == "A (Video Saja)":
-        cmd_list.extend(["-c:v", "copy", "-c:a", "copy"])
+        # Tambahkan bitstream filter untuk membersihkan metadata h264 yang bikin crash
+        cmd_list.extend(["-c:v", "copy", "-bsf:v", "h264_mp4toannexb", "-c:a", "copy"])
         cmd_list.extend(common_out_opts)
 
     elif mode == "B (Video + Audio Harian)":
@@ -225,12 +236,12 @@ def _build_ffmpeg_command(paths, mode):
         audio_codec_options = []
         if daily_audio_file.suffix.lower() in ['.m4a', '.aac']:
             audio_codec_options = ["-c:a", "copy"]
-        else: # .mp3 perlu transcode dikit ke aac agar kompatibel dg FLV/RTMP, atau bisa copy jika yakin. Amannya aac.
+        else: # .mp3 perlu transcode dikit ke aac
             audio_codec_options = ["-c:a", "aac", "-b:a", AUDIO_BITRATE]
 
         cmd_list.extend(["-stream_loop", "-1", "-i", str(daily_audio_file), 
                          "-map", "0:v:0", "-map", "1:a:0", 
-                         "-c:v", "copy"] + audio_codec_options)
+                         "-c:v", "copy", "-bsf:v", "h264_mp4toannexb"] + audio_codec_options)
         cmd_list.extend(common_out_opts)
     else:
         return None
@@ -468,7 +479,7 @@ chmod +x "${PYTHON_SCRIPT_PATH}" || { log_error "Gagal membuat skrip Python dapa
 log_info "Skrip Python berhasil ditempatkan."
 
 log_info "==================================================="
-log_info "     YTLIVE STREAMER SETUP COMPLETE (v26)!"
+log_info "     YTLIVE STREAMER SETUP COMPLETE (v27)!"
 log_info "==================================================="
-log_info "Perbaikan: Debian 13 OK & Log Bersih (No Bitrate Warning)."
-log_info "Jalankan 'ytlive' untuk memulai."
+log_info "Perbaikan: Prioritas APT FFMPEG + Filter QSV Cleaner."
+log_info "Silakan jalankan 'ytlive' untuk memulai."
