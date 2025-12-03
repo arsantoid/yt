@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ===================================================================
-#            SETUP SCRIPT YTLIVE STREAMER (v25 - DEBIAN 13 FIX)
+#      SETUP SCRIPT YTLIVE STREAMER (v26 - CLEAN LOGS & DEBIAN 13 FIX)
 # ===================================================================
 
 set -e # HENTIKAN SKRIP JIKA ADA ERROR
@@ -25,12 +25,10 @@ log_info "Mengatur zona waktu dan memperbarui paket..."
 timedatectl set-timezone Asia/Jakarta || log_warn "Gagal mengatur zona waktu."
 apt-get update -y >/dev/null || log_error "Gagal memperbarui daftar paket."
 
-# [PERBAIKAN DEBIAN 13]
-# 1. Instal dependensi dasar + library Python via APT (menghindari error pip PEP 668 di Debian 13)
+# [LOGIKA DETEKSI DEBIAN 13 vs 11]
 log_info "Menginstal dependensi dasar..."
 apt-get install -y python3 python3-pip python3-psutil python3-requests wget tar xz-utils acl logrotate || log_error "Gagal menginstal dependensi dasar."
 
-# 2. Instal PolicyKit dengan logika cerdas (Debian 11 vs Debian 13)
 log_info "Mengecek versi PolicyKit yang sesuai..."
 if apt-get install -y policykit-1 2>/dev/null; then
     log_info "Paket 'policykit-1' berhasil diinstal (Mode Debian 11/Legacy)."
@@ -39,9 +37,8 @@ else
     apt-get install -y polkitd pkexec || log_error "Gagal menginstal PolicyKit (polkitd/pkexec)."
 fi
 
-# --- 2. Pembaruan Komponen Skrip (Jadwal & Stream Aman) ---
-log_info "Memperbarui komponen skrip (jadwal dan stream aktif akan tetap aman)..."
-# Hapus hanya file-file yang akan dibuat ulang oleh installer ini.
+# --- 2. Pembaruan Komponen Skrip ---
+log_info "Memperbarui komponen skrip (jadwal dan stream aktif aman)..."
 rm -f /etc/systemd/system/ytlive-stream@.service
 rm -f /etc/systemd/system/ytlive-schedule-start@.service
 rm -f /etc/systemd/system/ytlive-schedule-stop@.service
@@ -49,8 +46,7 @@ rm -f /etc/sudoers.d/ytlive
 rm -f /etc/logrotate.d/ytlive
 rm -f "${PYTHON_SCRIPT_PATH}"
 rm -f "${WORKER_SCRIPT_PATH}"
-log_info "Komponen lama berhasil dihapus, siap untuk diperbarui."
-
+log_info "Komponen lama berhasil dihapus."
 
 # --- 3. Instal FFMPEG ---
 if [ ! -f "/usr/bin/ffmpeg" ]; then
@@ -66,7 +62,6 @@ else
     log_info "FFMPEG sudah ada, instalasi dilewati."
 fi
 
-
 # --- 4. Buat Direktori & Pengguna ---
 log_info "Memeriksa direktori, pengguna, dan izin akses..."
 mkdir -p "${CHANNELS_BASE_DIR}"
@@ -78,13 +73,13 @@ setfacl -m u:${SERVICE_USER}:x /root/data &>/dev/null || true
 log_info "Direktori dan izin akses berhasil dikonfigurasi."
 
 # --- 5. Buat Aturan Izin Sudo ---
-log_info "Membuat aturan Sudo untuk izin service..."
+log_info "Membuat aturan Sudo..."
 echo 'ytlive ALL=(ALL) NOPASSWD: /bin/systemctl start ytlive-*, /bin/systemctl stop ytlive-*' | tee /etc/sudoers.d/ytlive
 chmod 0440 /etc/sudoers.d/ytlive
 log_info "Aturan Sudo berhasil dibuat."
 
 # --- 6. Konfigurasi Log Rotation ---
-log_info "Mengkonfigurasi rotasi log otomatis..."
+log_info "Mengkonfigurasi rotasi log..."
 cat << EOF > "/etc/logrotate.d/ytlive"
 /root/data/channels/*/stream.log {
     daily
@@ -96,16 +91,13 @@ cat << EOF > "/etc/logrotate.d/ytlive"
     copytruncate
 }
 EOF
-log_info "Logrotate untuk ytlive berhasil dikonfigurasi."
-
 
 # --- 7. Buat Skrip Pekerja (Bash Worker) ---
-log_info "Membuat skrip pekerja di ${WORKER_SCRIPT_PATH}..."
+log_info "Membuat skrip pekerja..."
 cat << EOF > "${WORKER_SCRIPT_PATH}"
 #!/bin/bash
 set -e
 CHANNEL_NAME=\$1
-# Jalankan (exec) FFMPEG. Perintah FFMPEG diambil dari output Python.
 exec \$(/usr/bin/python3 ${PYTHON_SCRIPT_PATH} _internal_get_ffmpeg_cmd "\$CHANNEL_NAME") &>> stream.log
 EOF
 chmod +x "${WORKER_SCRIPT_PATH}"
@@ -143,8 +135,8 @@ ExecStart=${PYTHON_SCRIPT_PATH} stop %i
 EOF
 systemctl daemon-reload
 
-# --- 9. Tempatkan Skrip Manajemen (Python CLI) - FINAL ---
-log_info "Menempatkan script manajemen Python ke ${PYTHON_SCRIPT_PATH}..."
+# --- 9. Tempatkan Skrip Manajemen (Python CLI) - FINAL v26 ---
+log_info "Menempatkan script manajemen Python (v26 - Clean Logs)..."
 cat << 'EOF' > "${PYTHON_SCRIPT_PATH}"
 #!/usr/bin/env python3
 import os
@@ -164,8 +156,6 @@ import re
 # ===================================================================
 CHANNELS_DIR = Path("/root/data/channels")
 YOUTUBE_RTMP_URL = "rtmp://a.rtmp.youtube.com/live2"
-MAX_BITRATE = "2500k"
-BUFFER_SIZE = "5000k"
 AUDIO_BITRATE = "128k"
 SERVICE_USER = "ytlive"
 SERVICE_GROUP = "ytlive"
@@ -216,8 +206,11 @@ def _build_ffmpeg_command(paths, mode):
     day_of_year = datetime.now().timetuple().tm_yday
     video = videos[(day_of_year - 1) % len(videos)]
 
+    # Base Command (Input)
     cmd_list = [FFMPEG_PATH, "-re", "-fflags", "+genpts", "-stream_loop", "-1", "-i", str(video)]
-    common_out_opts = ["-f", "flv", "-maxrate", MAX_BITRATE, "-bufsize", BUFFER_SIZE, f"{YOUTUBE_RTMP_URL}/{key}"]
+    
+    # Output Options (TANPA maxrate/bufsize agar tidak warning di mode copy)
+    common_out_opts = ["-f", "flv", f"{YOUTUBE_RTMP_URL}/{key}"]
 
     if mode == "A (Video Saja)":
         cmd_list.extend(["-c:v", "copy", "-c:a", "copy"])
@@ -232,7 +225,7 @@ def _build_ffmpeg_command(paths, mode):
         audio_codec_options = []
         if daily_audio_file.suffix.lower() in ['.m4a', '.aac']:
             audio_codec_options = ["-c:a", "copy"]
-        else: # .mp3
+        else: # .mp3 perlu transcode dikit ke aac agar kompatibel dg FLV/RTMP, atau bisa copy jika yakin. Amannya aac.
             audio_codec_options = ["-c:a", "aac", "-b:a", AUDIO_BITRATE]
 
         cmd_list.extend(["-stream_loop", "-1", "-i", str(daily_audio_file), 
@@ -475,7 +468,7 @@ chmod +x "${PYTHON_SCRIPT_PATH}" || { log_error "Gagal membuat skrip Python dapa
 log_info "Skrip Python berhasil ditempatkan."
 
 log_info "==================================================="
-log_info "         YTLIVE STREAMER SETUP COMPLETE!"
+log_info "     YTLIVE STREAMER SETUP COMPLETE (v26)!"
 log_info "==================================================="
-log_info "Perbaikan Debian 13 telah diterapkan (Dependencies & Polkit)."
-log_info "Silakan jalankan 'ytlive' untuk memulai."
+log_info "Perbaikan: Debian 13 OK & Log Bersih (No Bitrate Warning)."
+log_info "Jalankan 'ytlive' untuk memulai."
