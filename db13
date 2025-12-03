@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # ===================================================================
-#   SETUP SCRIPT YTLIVE STREAMER (v28 - FIX ASPECT RATIO & SEGFAULT)
+#   SETUP SCRIPT YTLIVE STREAMER (v30 - STABIL COPY MODE DEBIAN 11/13)
 # ===================================================================
 
-set -e # HENTIKAN SKRIP JIKA ADA ERROR
+set -e  # Hentikan skrip jika ada error
 
 # --- Variabel Konfigurasi ---
 PYTHON_SCRIPT_NAME="ytlive"
@@ -16,8 +16,8 @@ SERVICE_GROUP="ytlive"
 FFMPEG_JV_DIR="/opt/ffmpeg-johnvansickle"
 
 # --- Fungsi Logging ---
-log_info() { echo -e "\e[32m[INFO]\e[0m $1"; }
-log_warn() { echo -e "\e[33m[PERINGATAN]\e[0m $1"; }
+log_info()  { echo -e "\e[32m[INFO]\e[0m $1"; }
+log_warn()  { echo -e "\e[33m[PERINGATAN]\e[0m $1"; }
 log_error() { echo -e "\e[31m[ERROR]\e[0m $1"; exit 1; }
 
 # --- 1. Konfigurasi Sistem ---
@@ -25,62 +25,58 @@ log_info "Mengatur zona waktu dan memperbarui paket..."
 timedatectl set-timezone Asia/Jakarta || log_warn "Gagal mengatur zona waktu."
 apt-get update -y >/dev/null || log_error "Gagal memperbarui daftar paket."
 
-# [LOGIKA DETEKSI DEBIAN 13 vs 11]
 log_info "Menginstal dependensi dasar..."
-apt-get install -y python3 python3-pip python3-psutil python3-requests wget tar xz-utils acl logrotate || log_error "Gagal menginstal dependensi dasar."
+apt-get install -y \
+  python3 python3-pip python3-psutil python3-requests \
+  wget tar xz-utils acl logrotate || \
+  log_error "Gagal menginstal dependensi dasar."
 
-log_info "Mengecek versi PolicyKit yang sesuai..."
+log_info "Menginstal PolicyKit yang kompatibel..."
 if apt-get install -y policykit-1 2>/dev/null; then
-    log_info "Paket 'policykit-1' berhasil diinstal (Mode Debian 11/Legacy)."
+  log_info "policykit-1 terinstal (mode Debian 11/legacy)."
 else
-    log_info "'policykit-1' tidak ditemukan, beralih ke 'polkitd' & 'pkexec' (Mode Debian 13/Trixie)..."
-    apt-get install -y polkitd pkexec || log_error "Gagal menginstal PolicyKit (polkitd/pkexec)."
+  log_info "policykit-1 tidak ada, pakai polkitd + pkexec (Debian 13+)."
+  apt-get install -y polkitd pkexec || log_error "Gagal menginstal polkitd/pkexec."
 fi
 
-# --- 2. Pembaruan Komponen Skrip ---
-log_info "Memperbarui komponen skrip..."
+# --- 2. Bersihkan komponen lama yang akan diganti ---
+log_info "Membersihkan unit systemd & skrip lama..."
 rm -f /etc/systemd/system/ytlive-stream@.service
 rm -f /etc/systemd/system/ytlive-schedule-start@.service
 rm -f /etc/systemd/system/ytlive-schedule-stop@.service
+rm -f /etc/sudoers.d/ytlive
+rm -f /etc/logrotate.d/ytlive
 rm -f "${PYTHON_SCRIPT_PATH}"
 rm -f "${WORKER_SCRIPT_PATH}"
-log_info "Komponen lama berhasil dihapus."
 
-# --- 3. Instal FFMPEG (Prioritas APT agar Stabil) ---
-log_info "Mencoba menginstal FFMPEG stabil dari repository Debian..."
-if apt-get install -y ffmpeg; then
-    log_info "FFMPEG berhasil diinstal dari APT (Versi Stabil)."
-    FFMPEG_BIN="/usr/bin/ffmpeg"
-else
-    log_warn "FFMPEG APT gagal, mencoba instalasi Static Build (Fallback)..."
-    if [ ! -f "${FFMPEG_JV_DIR}/ffmpeg" ]; then
-        mkdir -p "${FFMPEG_JV_DIR}"
-        cd /tmp
-        wget -q --show-progress "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
-        tar -xf ffmpeg-release-amd64-static.tar.xz -C "${FFMPEG_JV_DIR}" --strip-components=1
-    fi
-    ln -sf "${FFMPEG_JV_DIR}/ffmpeg" /usr/bin/ffmpeg
-    ln -sf "${FFMPEG_JV_DIR}/ffprobe" /usr/bin/ffprobe
-    FFMPEG_BIN="/usr/bin/ffmpeg"
-    log_info "FFMPEG Static Build berhasil diinstal."
+# --- 3. FFMPEG: pakai versi APT yang stabil ---
+log_info "Menginstal FFMPEG dari repository Debian..."
+# Jika sebelumnya ada ffmpeg John, putuskan symlink tapi biarkan foldernya
+if [ -L /usr/bin/ffmpeg ] && readlink /usr/bin/ffmpeg | grep -q "ffmpeg-johnvansickle"; then
+  rm -f /usr/bin/ffmpeg /usr/bin/ffprobe
 fi
+apt-get install -y ffmpeg || log_error "Gagal menginstal ffmpeg dari APT."
+FFMPEG_BIN="/usr/bin/ffmpeg"
 
-# --- 4. Buat Direktori & Pengguna ---
-log_info "Memeriksa direktori, pengguna, dan izin akses..."
+# --- 4. Direktori & user service ---
+log_info "Menyiapkan direktori channel & user service..."
 mkdir -p "${CHANNELS_BASE_DIR}"
 id -g "${SERVICE_GROUP}" &>/dev/null || groupadd "${SERVICE_GROUP}"
 id -u "${SERVICE_USER}" &>/dev/null || useradd -r -s /bin/false -g "${SERVICE_GROUP}" "${SERVICE_USER}"
 chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${CHANNELS_BASE_DIR}"
-setfacl -m u:${SERVICE_USER}:x /root &>/dev/null || true
-setfacl -m u:${SERVICE_USER}:x /root/data &>/dev/null || true
-log_info "Direktori dan izin akses berhasil dikonfigurasi."
+setfacl -m u:${SERVICE_USER}:x /root       &>/dev/null || true
+setfacl -m u:${SERVICE_USER}:x /root/data  &>/dev/null || true
 
-# --- 5. Buat Aturan Izin Sudo ---
-echo 'ytlive ALL=(ALL) NOPASSWD: /bin/systemctl start ytlive-*, /bin/systemctl stop ytlive-*' | tee /etc/sudoers.d/ytlive
+# --- 5. Aturan sudo untuk start/stop service ---
+log_info "Membuat aturan sudo untuk ytlive..."
+cat << EOF > /etc/sudoers.d/ytlive
+ytlive ALL=(ALL) NOPASSWD: /bin/systemctl start ytlive-*, /bin/systemctl stop ytlive-*
+EOF
 chmod 0440 /etc/sudoers.d/ytlive
 
-# --- 6. Konfigurasi Log Rotation ---
-cat << EOF > "/etc/logrotate.d/ytlive"
+# --- 6. Logrotate ---
+log_info "Mengkonfigurasi logrotate..."
+cat << EOF > /etc/logrotate.d/ytlive
 /root/data/channels/*/stream.log {
     daily
     rotate 7
@@ -92,8 +88,8 @@ cat << EOF > "/etc/logrotate.d/ytlive"
 }
 EOF
 
-# --- 7. Buat Skrip Pekerja (Bash Worker) ---
-log_info "Membuat skrip pekerja..."
+# --- 7. Skrip worker bash ---
+log_info "Membuat worker script ${WORKER_SCRIPT_PATH}..."
 cat << EOF > "${WORKER_SCRIPT_PATH}"
 #!/bin/bash
 set -e
@@ -102,13 +98,14 @@ exec \$(/usr/bin/python3 ${PYTHON_SCRIPT_PATH} _internal_get_ffmpeg_cmd "\$CHANN
 EOF
 chmod +x "${WORKER_SCRIPT_PATH}"
 
-# --- 8. Buat Template Service Systemd ---
-log_info "Membuat template service Systemd..."
-cat << EOF > "/etc/systemd/system/ytlive-stream@.service"
+# --- 8. Unit systemd template ---
+log_info "Membuat unit systemd template..."
+cat << EOF > /etc/systemd/system/ytlive-stream@.service
 [Unit]
 Description=YTLive Streamer for %i
 StartLimitIntervalSec=500
 StartLimitBurst=5
+
 [Service]
 User=${SERVICE_USER}
 Group=${SERVICE_GROUP}
@@ -116,29 +113,33 @@ WorkingDirectory=${CHANNELS_BASE_DIR}/%i
 ExecStart=${WORKER_SCRIPT_PATH} %i
 Restart=always
 RestartSec=5
+
 [Install]
 WantedBy=multi-user.target
 EOF
-cat << EOF > "/etc/systemd/system/ytlive-schedule-start@.service"
+
+cat << EOF > /etc/systemd/system/ytlive-schedule-start@.service
 [Unit]
-Description=Scheduled start for YTLive Streamer channel %i
+Description=Scheduled start for YTLive channel %i
 [Service]
 Type=oneshot
 User=${SERVICE_USER}
 ExecStart=${PYTHON_SCRIPT_PATH} start %i
 EOF
-cat << EOF > "/etc/systemd/system/ytlive-schedule-stop@.service"
+
+cat << EOF > /etc/systemd/system/ytlive-schedule-stop@.service
 [Unit]
-Description=Scheduled stop for YTLive Streamer channel %i
+Description=Scheduled stop for YTLive channel %i
 [Service]
 Type=oneshot
 User=${SERVICE_USER}
 ExecStart=${PYTHON_SCRIPT_PATH} stop %i
 EOF
+
 systemctl daemon-reload
 
-# --- 9. Tempatkan Skrip Manajemen (Python CLI) - FINAL v28 ---
-log_info "Menempatkan script manajemen Python (v28 - Fix Aspect Ratio)..."
+# --- 9. CLI Python ytlive (mode A/B full copy) ---
+log_info "Menulis skrip manajemen Python ke ${PYTHON_SCRIPT_PATH}..."
 cat << 'EOF' > "${PYTHON_SCRIPT_PATH}"
 #!/usr/bin/env python3
 import os
@@ -146,327 +147,439 @@ import sys
 import subprocess
 import argparse
 import shlex
-import random
-import time
 from pathlib import Path
 from datetime import datetime, timedelta
 import shutil
-import re
 
-# ===================================================================
-# --- PUSAT KONFIGURASI ---
-# ===================================================================
-CHANNELS_DIR = Path("/root/data/channels")
+# ===================== KONFIGURASI =========================
+CHANNELS_DIR    = Path("/root/data/channels")
 YOUTUBE_RTMP_URL = "rtmp://a.rtmp.youtube.com/live2"
-AUDIO_BITRATE = "128k"
-SERVICE_USER = "ytlive"
-SERVICE_GROUP = "ytlive"
-LIFETIME_TAG = "# LIFETIME_STREAM"
-FFMPEG_PATH = "/usr/bin/ffmpeg"
-SYSTEMD_DIR = Path("/etc/systemd/system")
-# ===================================================================
+AUDIO_BITRATE   = "128k"
+SERVICE_USER    = "ytlive"
+SERVICE_GROUP   = "ytlive"
+LIFETIME_TAG    = "# LIFETIME_STREAM"
+FFMPEG_PATH     = "/usr/bin/ffmpeg"
+SYSTEMD_DIR     = Path("/etc/systemd/system")
+# ==========================================================
 
-# --- Kode Warna ---
 COLOR_RESET = "\033[0m"
-COLOR_INFO = "\033[0;32m"
-COLOR_WARN = "\033[0;33m"
+COLOR_INFO  = "\033[0;32m"
+COLOR_WARN  = "\033[0;33m"
 COLOR_ERROR = "\033[0;31m"
-COLOR_CYAN = "\033[0;36m"
+COLOR_CYAN  = "\033[0;36m"
 COLOR_STATUS_RUNNING = COLOR_INFO
 COLOR_STATUS_STOPPED = COLOR_WARN
-COLOR_STATUS_CRASH = COLOR_ERROR
-# ===================================================================
+COLOR_STATUS_CRASH   = COLOR_ERROR
 
-def print_info(message): print(f"{COLOR_INFO}[INFO]{COLOR_RESET} {message}")
-def print_warn(message): print(f"{COLOR_WARN}[PERINGATAN]{COLOR_RESET} {message}")
-def print_error(message): print(f"{COLOR_ERROR}[ERROR]{COLOR_RESET} {message}")
+def print_info(msg):  print(f"{COLOR_INFO}[INFO]{COLOR_RESET} {msg}")
+def print_warn(msg):  print(f"{COLOR_WARN}[PERINGATAN]{COLOR_RESET} {msg}")
+def print_error(msg): print(f"{COLOR_ERROR}[ERROR]{COLOR_RESET} {msg}")
 
-def _get_paths(channel_name):
-    channel_dir = CHANNELS_DIR / channel_name
+def _get_paths(name):
+    d = CHANNELS_DIR / name
     return {
-        "dir": channel_dir, "lock": channel_dir / ".stream.lock", "log": channel_dir / "stream.log",
-        "key": channel_dir / "stream_key.txt"
+        "dir": d,
+        "lock": d / ".stream.lock",
+        "log": d / "stream.log",
+        "key": d / "stream_key.txt",
     }
 
 def _get_channel_mode(paths):
-    if not paths["dir"].is_dir(): return "N/A"
+    if not paths["dir"].is_dir():
+        return "N/A"
     videos = list(paths["dir"].glob("*.mp4")) + list(paths["dir"].glob("*.mkv"))
-    if not videos or any(v.stat().st_size == 0 for v in videos): return "N/A (Video Kosong)"
-    
-    audios = list(paths["dir"].glob("*.mp3")) + list(paths["dir"].glob("*.m4a")) + list(paths["dir"].glob("*.aac"))
-    
-    if len(audios) > 0:
+    if not videos or any(v.stat().st_size == 0 for v in videos):
+        return "N/A (Video Kosong)"
+    audios = (list(paths["dir"].glob("*.mp3"))
+              + list(paths["dir"].glob("*.m4a"))
+              + list(paths["dir"].glob("*.aac")))
+    if audios:
         return "B (Video + Audio Harian)"
-    else:
-        return "A (Video Saja)"
+    return "A (Video Saja)"
 
 def _build_ffmpeg_command(paths, mode):
-    if not paths["key"].is_file() or paths["key"].stat().st_size == 0: return None
+    if not paths["key"].is_file() or paths["key"].stat().st_size == 0:
+        return None
     key = paths["key"].read_text().strip()
     videos = sorted(list(paths["dir"].glob("*.mp4")) + list(paths["dir"].glob("*.mkv")))
-    
+    if not videos:
+        return None
     day_of_year = datetime.now().timetuple().tm_yday
     video = videos[(day_of_year - 1) % len(videos)]
 
-    # Base Command
-    # Tambahkan -re (realtime), -fflags +genpts (fix timestamp)
-    cmd_list = [FFMPEG_PATH, "-re", "-fflags", "+genpts", "-stream_loop", "-1", "-i", str(video)]
-    
-    # Output Options
-    # [FIX] Tambahkan '-aspect 16:9' agar video tidak gepeng
-    common_out_opts = ["-f", "flv", f"{YOUTUBE_RTMP_URL}/{key}"]
-
-    # Filter Bitstream (Penting untuk copy mode agar header h264 benar)
-    # [FIX] Tambahkan filter 'h264_metadata' untuk memaksa sample_aspect_ratio=1/1 jika perlu, tapi biasanya -aspect cukup.
-    # Kita pakai -bsf:v h264_mp4toannexb untuk kestabilan.
-    
+    # Base: realtime + loop video, TANPA filter tambahan
     if mode == "A (Video Saja)":
-        # Force aspect ratio di sini
-        cmd_list.extend(["-c:v", "copy", "-bsf:v", "h264_mp4toannexb", "-c:a", "copy", "-aspect", "16:9"])
-        cmd_list.extend(common_out_opts)
+        cmd = [
+            FFMPEG_PATH,
+            "-re",
+            "-stream_loop", "-1",
+            "-i", str(video),
+            "-c:v", "copy",
+            "-c:a", "copy",
+            "-f", "flv",
+            f"{YOUTUBE_RTMP_URL}/{key}",
+        ]
+        return cmd
 
     elif mode == "B (Video + Audio Harian)":
-        audios = sorted(list(paths["dir"].glob("*.mp3")) + list(paths["dir"].glob("*.m4a")) + list(paths["dir"].glob("*.aac")))
-        if not audios: return None
-        
-        daily_audio_file = audios[(day_of_year - 1) % len(audios)]
-        
-        audio_codec_options = []
-        if daily_audio_file.suffix.lower() in ['.m4a', '.aac']:
-            audio_codec_options = ["-c:a", "copy"]
-        else: 
-            audio_codec_options = ["-c:a", "aac", "-b:a", AUDIO_BITRATE]
+        audios = sorted(list(paths["dir"].glob("*.mp3")) +
+                        list(paths["dir"].glob("*.m4a")) +
+                        list(paths["dir"].glob("*.aac")))
+        if not audios:
+            return None
+        audio = audios[(day_of_year - 1) % len(audios)]
 
-        # Force aspect ratio di sini juga
-        cmd_list.extend(["-stream_loop", "-1", "-i", str(daily_audio_file), 
-                         "-map", "0:v:0", "-map", "1:a:0", 
-                         "-c:v", "copy", "-bsf:v", "h264_mp4toannexb", "-aspect", "16:9"] + audio_codec_options)
-        cmd_list.extend(common_out_opts)
-    else:
-        return None
-    
-    return cmd_list
+        # Audio: kalau m4a/aac -> copy, kalau mp3 -> transcode ke aac
+        audio_codec = []
+        if audio.suffix.lower() in [".m4a", ".aac"]:
+            audio_codec = ["-c:a", "copy"]
+        else:
+            audio_codec = ["-c:a", "aac", "-b:a", AUDIO_BITRATE]
+
+        cmd = [
+            FFMPEG_PATH,
+            "-re",
+            "-stream_loop", "-1",
+            "-i", str(video),
+            "-stream_loop", "-1",
+            "-i", str(audio),
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "copy",
+            *audio_codec,
+            "-f", "flv",
+            f"{YOUTUBE_RTMP_URL}/{key}",
+        ]
+        return cmd
+
+    return None
 
 def handle_start(args):
     paths = _get_paths(args.channel)
-    if not paths["dir"].is_dir(): return print_error(f"Channel '{args.channel}' tidak ditemukan.")
-    if subprocess.run(['systemctl', 'is-active', '--quiet', f"ytlive-stream@{args.channel}.service"]).returncode == 0:
+    if not paths["dir"].is_dir():
+        return print_error(f"Channel '{args.channel}' tidak ditemukan.")
+    if subprocess.run(["systemctl", "is-active", "--quiet",
+                       f"ytlive-stream@{args.channel}.service"]).returncode == 0:
         return print_warn(f"Service untuk '{args.channel}' sudah berjalan.")
     paths["lock"].write_text(LIFETIME_TAG)
     try:
-        subprocess.run(['sudo', 'systemctl', 'start', f"ytlive-stream@{args.channel}.service"], check=True)
-        print_info(f"Streaming '{args.channel}' dimulai via Systemd.")
-        if (SYSTEMD_DIR / f"ytlive-schedule-start@{args.channel}.timer").exists():
-            print_warn("Jadwal yang ada untuk channel ini TIDAK dihapus.")
+        subprocess.run(
+            ["sudo", "systemctl", "start", f"ytlive-stream@{args.channel}.service"],
+            check=True
+        )
+        print_info(f"Streaming '{args.channel}' dimulai via systemd.")
     except subprocess.CalledProcessError:
         print_error(f"Gagal memulai service. Cek log dengan: ytlive debug {args.channel}")
 
 def handle_stop(args, quiet=False):
-    subprocess.run(['sudo', 'systemctl', 'stop', f"ytlive-stream@{args.channel}.service"], check=False, capture_output=True)
+    subprocess.run(
+        ["sudo", "systemctl", "stop", f"ytlive-stream@{args.channel}.service"],
+        check=False,
+        capture_output=True,
+    )
     paths = _get_paths(args.channel)
     paths["lock"].unlink(missing_ok=True)
-    if not quiet: print_info(f"Stream '{args.channel}' dihentikan.")
+    if not quiet:
+        print_info(f"Stream '{args.channel}' dihentikan.")
 
 def handle_list(args):
     print(f"{'NAMA CHANNEL':<25} {'MODE':<28} {'STATUS':<20} {'JADWAL'}")
     print("-" * 100)
-    if not CHANNELS_DIR.is_dir(): return
-    timers_output = subprocess.run(['systemctl', 'list-timers', 'ytlive-schedule-*', '--no-legend', '--all'], capture_output=True, text=True).stdout
-    timers = [line.split() for line in timers_output.splitlines() if 'ytlive-schedule' in line]
-    for channel_dir in sorted(CHANNELS_DIR.iterdir()):
-        if not channel_dir.is_dir(): continue
-        ch_name, paths = channel_dir.name, _get_paths(channel_dir.name)
+    if not CHANNELS_DIR.is_dir():
+        return
+    timers_output = subprocess.run(
+        ["systemctl", "list-timers", "ytlive-schedule-*", "--no-legend", "--all"],
+        capture_output=True,
+        text=True,
+    ).stdout
+    timers = [line.split() for line in timers_output.splitlines()
+              if "ytlive-schedule" in line]
+
+    for d in sorted(CHANNELS_DIR.iterdir()):
+        if not d.is_dir():
+            continue
+        ch_name = d.name
+        paths = _get_paths(ch_name)
         mode = _get_channel_mode(paths)
-        status, jadwal = f"{COLOR_STATUS_STOPPED}[ STOPPED ]{COLOR_RESET}", "Manual"
-        start_timer = next((t for t in timers if f"ytlive-schedule-start@{ch_name}.timer" in t), None)
-        stop_timer = next((t for t in timers if f"ytlive-schedule-stop@{ch_name}.timer" in t), None)
-        is_scheduled = start_timer and stop_timer
-        if subprocess.run(['systemctl', 'is-active', '--quiet', f"ytlive-stream@{ch_name}.service"]).returncode == 0:
+        status = f"{COLOR_STATUS_STOPPED}[ STOPPED ]{COLOR_RESET}"
+        jadwal = "Manual"
+
+        start_timer = next((t for t in timers
+                            if f"ytlive-schedule-start@{ch_name}.timer" in t), None)
+        stop_timer = next((t for t in timers
+                           if f"ytlive-schedule-stop@{ch_name}.timer" in t), None)
+        is_scheduled = bool(start_timer and stop_timer)
+
+        if subprocess.run(["systemctl", "is-active", "--quiet",
+                           f"ytlive-stream@{ch_name}.service"]).returncode == 0:
             status = f"{COLOR_STATUS_RUNNING}[ RUNNING ]{COLOR_RESET}"
-        elif paths['lock'].exists() and not is_scheduled:
-             status = f"{COLOR_STATUS_CRASH}[  CRASH  ]{COLOR_RESET}"
+        elif paths["lock"].exists() and not is_scheduled:
+            status = f"{COLOR_STATUS_CRASH}[  CRASH  ]{COLOR_RESET}"
+
         if is_scheduled:
             try:
-                start_time_str = start_timer[2]; stop_time_str = stop_timer[2]
-                start_time = datetime.strptime(start_time_str, '%H:%M:%S').strftime('%H:%M')
-                stop_time = datetime.strptime(stop_time_str, '%H:%M:%S').strftime('%H:%M')
-                jadwal = f"{start_time} - {stop_time}"
-            except (ValueError, IndexError):
-                jadwal = "Terjadwal (Error Parsing)"
+                st = start_timer[2]
+                et = stop_timer[2]
+                st_hm = datetime.strptime(st, "%H:%M:%S").strftime("%H:%M")
+                et_hm = datetime.strptime(et, "%H:%M:%S").strftime("%H:%M")
+                jadwal = f"{st_hm} - {et_hm}"
+            except Exception:
+                jadwal = "Terjadwal (?)"
         elif paths["lock"].exists():
             jadwal = "Manual/Lifetime"
+
         print(f"{ch_name:<25} {COLOR_CYAN}{mode:<28}{COLOR_RESET} {status:<20} {jadwal}")
     print("-" * 100)
 
 def handle_timers(args):
-    print_info("Menampilkan Jadwal Timer Systemd untuk YTLive...")
+    print_info("Menampilkan jadwal timer systemd untuk YTLive...")
     print("-" * 70)
-    subprocess.run(['systemctl', 'list-timers', 'ytlive-schedule-*', '--no-pager'])
+    subprocess.run(["systemctl", "list-timers", "ytlive-schedule-*", "--no-pager"])
     print("-" * 70)
 
 def handle_create(args):
     paths = _get_paths(args.channel)
-    if paths["dir"].exists(): print_info(f"Channel '{args.channel}' sudah ada."); return
-    paths["dir"].mkdir(parents=True, exist_ok=True); paths["key"].touch()
-    subprocess.run(['chown', '-R', f'{SERVICE_USER}:{SERVICE_GROUP}', str(paths["dir"])])
+    if paths["dir"].exists():
+        print_info(f"Channel '{args.channel}' sudah ada.")
+        return
+    paths["dir"].mkdir(parents=True, exist_ok=True)
+    paths["key"].touch()
+    subprocess.run(["chown", "-R", f"{SERVICE_USER}:{SERVICE_GROUP}", str(paths["dir"])])
     print_info(f"Channel '{args.channel}' dibuat di: {paths['dir']}")
 
 def handle_delete(args):
     paths = _get_paths(args.channel)
-    if not paths["dir"].exists(): return print_error(f"Channel '{args.channel}' tidak ditemukan.")
-    handle_stop(args, quiet=True); handle_unschedule(args, quiet=True)
-    if input(f"{COLOR_WARN}Anda yakin ingin menghapus '{args.channel}'? Ketik 'DELETE': {COLOR_RESET}") == "DELETE":
-        shutil.rmtree(paths["dir"]); print_info(f"Channel '{args.channel}' dihapus.")
+    if not paths["dir"].exists():
+        return print_error(f"Channel '{args.channel}' tidak ditemukan.")
+    handle_stop(args, quiet=True)
+    handle_unschedule(args, quiet=True)
+    ans = input(f"{COLOR_WARN}Anda yakin ingin menghapus '{args.channel}'? Ketik 'DELETE': {COLOR_RESET}")
+    if ans == "DELETE":
+        shutil.rmtree(paths["dir"])
+        print_info(f"Channel '{args.channel}' dihapus.")
 
 def handle_log(args):
     log_file = _get_paths(args.channel)["log"]
-    if not log_file.exists(): return print_info(f"Log file untuk '{args.channel}' tidak ditemukan.")
+    if not log_file.exists():
+        return print_info(f"Log file untuk '{args.channel}' tidak ditemukan.")
     print(f"-> Menampilkan log untuk '{args.channel}' (Ctrl+C untuk keluar)...")
     try:
-        with subprocess.Popen(['tail', '-f', str(log_file)]) as proc:
+        with subprocess.Popen(["tail", "-f", str(log_file)]) as proc:
             proc.wait()
     except KeyboardInterrupt:
         print("\nKeluar dari mode log.")
 
 def handle_status(args):
     paths = _get_paths(args.channel)
-    if not paths["dir"].is_dir(): return print_error(f"Channel '{args.channel}' tidak ditemukan.")
-    print("-" * 60); print(f"Status Detail untuk Channel: {COLOR_CYAN}{args.channel}{COLOR_RESET}")
-    mode = _get_channel_mode(paths); print(f"  - Mode             : {mode}")
+    if not paths["dir"].is_dir():
+        return print_error(f"Channel '{args.channel}' tidak ditemukan.")
+    print("-" * 60)
+    print(f"Status Detail untuk Channel: {COLOR_CYAN}{args.channel}{COLOR_RESET}")
+    mode = _get_channel_mode(paths)
+    print(f"  - Mode             : {mode}")
     status_str = f"{COLOR_STATUS_STOPPED}STOPPED{COLOR_RESET}"
-    if Path(f"/etc/systemd/system/ytlive-stream@{args.channel}.service").exists():
-        if subprocess.run(['systemctl', 'is-active', '--quiet', f"ytlive-stream@{args.channel}.service"]).returncode == 0: status_str = f"{COLOR_STATUS_RUNNING}RUNNING{COLOR_RESET}"
-        elif paths['lock'].exists(): status_str = f"{COLOR_STATUS_CRASH}CRASHED{COLOR_RESET}"
+    if (SYSTEMD_DIR / f"ytlive-stream@{args.channel}.service").exists():
+        if subprocess.run(["systemctl", "is-active", "--quiet",
+                           f"ytlive-stream@{args.channel}.service"]).returncode == 0:
+            status_str = f"{COLOR_STATUS_RUNNING}RUNNING{COLOR_RESET}"
+        elif paths["lock"].exists():
+            status_str = f"{COLOR_STATUS_CRASH}CRASHED{COLOR_RESET}"
     print(f"  - Status Service   : {status_str}")
-    print("  - Log Terakhir     : ")
-    if not paths["log"].exists(): print("    (Log file tidak ditemukan)")
+    print("  - Log Terakhir     :")
+    if not paths["log"].exists():
+        print("    (Log file tidak ditemukan)")
     else:
         try:
-            for line in paths["log"].read_text().splitlines()[-15:]: print(f"    {line}")
-        except Exception as e: print(f"    (Gagal membaca log: {e})")
+            lines = paths["log"].read_text().splitlines()[-15:]
+            for line in lines:
+                print(f"    {line}")
+        except Exception as e:
+            print(f"    (Gagal membaca log: {e})")
     print("-" * 60)
 
 def handle_debug(args):
-    service_name = f"ytlive-stream@{args.channel}.service"
-    print("-" * 60); print(f"Menampilkan log Systemd (journalctl) untuk: {COLOR_CYAN}{service_name}{COLOR_RESET}")
-    print("Log ini sangat penting jika status channel adalah [CRASHED]"); print("-" * 60)
+    service = f"ytlive-stream@{args.channel}.service"
+    print("-" * 60)
+    print(f"Menampilkan log systemd untuk: {COLOR_CYAN}{service}{COLOR_RESET}")
+    print("-" * 60)
     try:
-        subprocess.run(['journalctl', '-u', service_name, '-f', '--no-pager'])
+        subprocess.run(["journalctl", "-u", service, "-f", "--no-pager"])
     except KeyboardInterrupt:
         print("\nKeluar dari mode debug.")
     print("-" * 60)
 
 def _clean_single_channel(name, quiet=False):
     paths = _get_paths(name)
-    if subprocess.run(['systemctl', 'is-active', '--quiet', f"ytlive-stream@{name}.service"]).returncode == 0:
-        if not quiet: print_warn(f"Melewatkan pembersihan '{name}' karena sedang berjalan.")
+    if subprocess.run(["systemctl", "is-active", "--quiet",
+                       f"ytlive-stream@{name}.service"]).returncode == 0:
+        if not quiet:
+            print_warn(f"Melewatkan pembersihan '{name}' karena sedang berjalan.")
         return False
-    if not quiet: print_info(f"Membersihkan file sementara untuk '{name}'...")
+    if not quiet:
+        print_info(f"Membersihkan file sementara untuk '{name}'...")
     for f in [paths["log"], paths["lock"]]:
         if f.exists():
             f.unlink()
-            if not quiet: print(f"  -> Dihapus: {f.name}")
+            if not quiet:
+                print(f"  -> Dihapus: {f.name}")
     return True
 
 def handle_schedule(args):
-    _clean_single_channel(args.channel)
+    _clean_single_channel(args.channel, quiet=True)
     paths = _get_paths(args.channel)
-    if "N/A" in _get_channel_mode(paths): return print_error(f"Mode channel tidak valid atau file media kosong. Mode terdeteksi: '{_get_channel_mode(paths)}'")
+    mode = _get_channel_mode(paths)
+    if "N/A" in mode:
+        return print_error(f"Mode channel tidak valid atau file media kosong. Mode: '{mode}'")
     try:
-        start_dt = datetime.strptime(args.start_time, '%H:%M')
-        if args.stop_time:
-            stop_dt = datetime.strptime(args.stop_time, '%H:%M')
-        else:
-            stop_dt = start_dt + timedelta(hours=17, minutes=59)
+        start_dt = datetime.strptime(args.start_time, "%H:%M")
+        stop_dt = (datetime.strptime(args.stop_time, "%H:%M")
+                   if args.stop_time else
+                   start_dt + timedelta(hours=17, minutes=59))
     except ValueError:
-        return print_error("Format waktu salah. Gunakan HH:MM. Contoh: 08:00 atau 21:30")
-    
+        return print_error("Format waktu salah. Gunakan HH:MM, contoh 08:00 atau 21:30")
     handle_unschedule(args, quiet=True)
     paths["lock"].unlink(missing_ok=True)
-    ch_name = args.channel
+    ch = args.channel
     start_cal = f"*-*-* {start_dt.strftime('%H:%M:%S')}"
-    stop_cal = f"*-*-* {stop_dt.strftime('%H:%M:%S')}"
-    start_timer_content = f"""[Unit]\nDescription=Timer to start YTLive channel {ch_name}\n[Timer]\nOnCalendar={start_cal}\nPersistent=true\nUnit=ytlive-schedule-start@{ch_name}.service\n[Install]\nWantedBy=timers.target"""
-    stop_timer_content = f"""[Unit]\nDescription=Timer to stop YTLive channel {ch_name}\n[Timer]\nOnCalendar={stop_cal}\nPersistent=true\nUnit=ytlive-schedule-stop@{ch_name}.service\n[Install]\nWantedBy=timers.target"""
-    (SYSTEMD_DIR / f"ytlive-schedule-start@{ch_name}.timer").write_text(start_timer_content)
-    (SYSTEMD_DIR / f"ytlive-schedule-stop@{ch_name}.timer").write_text(stop_timer_content)
+    stop_cal  = f"*-*-* {stop_dt.strftime('%H:%M:%S')}"
+    (SYSTEMD_DIR / f"ytlive-schedule-start@{ch}.timer").write_text(
+        f"[Unit]\nDescription=Timer to start YTLive channel {ch}\n"
+        f"[Timer]\nOnCalendar={start_cal}\nPersistent=true\n"
+        f"Unit=ytlive-schedule-start@{ch}.service\n"
+        f"[Install]\nWantedBy=timers.target\n"
+    )
+    (SYSTEMD_DIR / f"ytlive-schedule-stop@{ch}.timer").write_text(
+        f"[Unit]\nDescription=Timer to stop YTLive channel {ch}\n"
+        f"[Timer]\nOnCalendar={stop_cal}\nPersistent=true\n"
+        f"Unit=ytlive-schedule-stop@{ch}.service\n"
+        f"[Install]\nWantedBy=timers.target\n"
+    )
     try:
-        subprocess.run(['systemctl', 'daemon-reload'], check=True)
-        subprocess.run(['systemctl', 'enable', f"ytlive-schedule-start@{ch_name}.timer", f"ytlive-schedule-stop@{ch_name}.timer"], check=True, capture_output=True)
-        subprocess.run(['systemctl', 'start', f"ytlive-schedule-start@{ch_name}.timer", f"ytlive-schedule-stop@{ch_name}.timer"], check=True, capture_output=True)
-        print_info(f"Jadwal '{ch_name}' berhasil diatur: {start_dt.strftime('%H:%M')} - {stop_dt.strftime('%H:%M')}")
+        subprocess.run(["systemctl", "daemon-reload"], check=True)
+        subprocess.run(["systemctl", "enable",
+                        f"ytlive-schedule-start@{ch}.timer",
+                        f"ytlive-schedule-stop@{ch}.timer"],
+                       check=True, capture_output=True)
+        subprocess.run(["systemctl", "start",
+                        f"ytlive-schedule-start@{ch}.timer",
+                        f"ytlive-schedule-stop@{ch}.timer"],
+                       check=True, capture_output=True)
+        print_info(f"Jadwal '{ch}' diatur: {start_dt.strftime('%H:%M')} - {stop_dt.strftime('%H:%M')}")
     except subprocess.CalledProcessError as e:
-        print_error(f"Gagal mengatur timer systemd. Detail: {e.stderr.decode()}")
-
+        print_error(f"Gagal mengatur timer systemd: {e}")
 
 def handle_unschedule(args, quiet=False):
-    ch_name = args.channel
-    start_timer = f"ytlive-schedule-start@{ch_name}.timer"
-    stop_timer = f"ytlive-schedule-stop@{ch_name}.timer"
-    if not (SYSTEMD_DIR / start_timer).exists():
-        if not quiet: print_info(f"Tidak ada jadwal untuk '{ch_name}'.")
+    ch = args.channel
+    start_timer = SYSTEMD_DIR / f"ytlive-schedule-start@{ch}.timer"
+    stop_timer  = SYSTEMD_DIR / f"ytlive-schedule-stop@{ch}.timer"
+    if not start_timer.exists():
+        if not quiet:
+            print_info(f"Tidak ada jadwal untuk '{ch}'.")
         return
-    subprocess.run(['systemctl', 'stop', start_timer, stop_timer], capture_output=True, check=False)
-    subprocess.run(['systemctl', 'disable', start_timer, stop_timer], capture_output=True, check=False)
-    (SYSTEMD_DIR / start_timer).unlink(missing_ok=True)
-    (SYSTEMD_DIR / stop_timer).unlink(missing_ok=True)
-    subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, check=False)
-    if not quiet: print_info(f"Jadwal untuk '{ch_name}' dihapus.")
+    subprocess.run(["systemctl", "stop",
+                    f"ytlive-schedule-start@{ch}.timer",
+                    f"ytlive-schedule-stop@{ch}.timer"],
+                   capture_output=True, check=False)
+    subprocess.run(["systemctl", "disable",
+                    f"ytlive-schedule-start@{ch}.timer",
+                    f"ytlive-schedule-stop@{ch}.timer"],
+                   capture_output=True, check=False)
+    start_timer.unlink(missing_ok=True)
+    stop_timer.unlink(missing_ok=True)
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True, check=False)
+    if not quiet:
+        print_info(f"Jadwal untuk '{ch}' dihapus.")
 
 def handle_clean(args):
-    if args.channel.lower() == 'all':
+    if args.channel.lower() == "all":
         for d in CHANNELS_DIR.iterdir():
-            if d.is_dir(): _clean_single_channel(d.name)
+            if d.is_dir():
+                _clean_single_channel(d.name)
     else:
         _clean_single_channel(args.channel)
 
 def handle_lifetime(args):
     paths = _get_paths(args.channel)
-    if subprocess.run(['systemctl', 'is-active', '--quiet', f"ytlive-stream@{args.channel}.service"]).returncode != 0:
-        handle_start(args) 
+    if subprocess.run(["systemctl", "is-active", "--quiet",
+                       f"ytlive-stream@{args.channel}.service"]).returncode != 0:
+        handle_start(args)
     handle_unschedule(args, quiet=True)
     paths["lock"].write_text(LIFETIME_TAG)
-    print_info(f"Stream '{args.channel}' telah diatur ke mode LIFETIME (permanen).")
+    print_info(f"Stream '{args.channel}' diatur ke mode LIFETIME (permanen).")
 
 def _internal_get_ffmpeg_cmd(args):
     paths = _get_paths(args.channel)
     mode = _get_channel_mode(paths)
     cmd = _build_ffmpeg_command(paths, mode)
-    if cmd: print(" ".join(shlex.quote(c) for c in cmd))
-    else:
-        with open(paths["log"], 'a') as f: f.write("ERROR: Gagal membangun perintah FFMPEG.\n")
+    if not cmd:
+        with open(paths["log"], "a") as f:
+            f.write("ERROR: Gagal membangun perintah FFMPEG.\n")
         sys.exit(1)
+    print(" ".join(shlex.quote(c) for c in cmd))
 
 def main():
-    parser = argparse.ArgumentParser(description="YTLive Streamer", formatter_class=argparse.RawTextHelpFormatter)
-    subparsers = parser.add_subparsers(dest='command'); subparsers.required = True
-    handler_map = {'start': handle_start, 'stop': handle_stop, 'list': handle_list, 'status': handle_status, 'create': handle_create, 'delete': handle_delete, 'log': handle_log, 'schedule': handle_schedule, 'unschedule': handle_unschedule, 'clean': handle_clean, 'lifetime': handle_lifetime, 'debug': handle_debug, 'timer': handle_timers}
-    if len(sys.argv) > 1 and sys.argv[1].startswith('_internal'):
-        internal_parser = argparse.ArgumentParser()
-        internal_parser.add_argument('command'); internal_parser.add_argument('channel')
-        args = internal_parser.parse_args()
-        if args.command == '_internal_get_ffmpeg_cmd': _internal_get_ffmpeg_cmd(args)
+    parser = argparse.ArgumentParser(description="YTLive Streamer")
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.required = True
+
+    handler_map = {
+        "start": handle_start,
+        "stop": handle_stop,
+        "list": handle_list,
+        "status": handle_status,
+        "create": handle_create,
+        "delete": handle_delete,
+        "log": handle_log,
+        "schedule": handle_schedule,
+        "unschedule": handle_unschedule,
+        "clean": handle_clean,
+        "lifetime": handle_lifetime,
+        "debug": handle_debug,
+        "timer": handle_timers,
+    }
+
+    # Internal helper
+    if len(sys.argv) > 1 and sys.argv[1].startswith("_internal"):
+        internal = argparse.ArgumentParser()
+        internal.add_argument("command")
+        internal.add_argument("channel")
+        a = internal.parse_args()
+        if a.command == "_internal_get_ffmpeg_cmd":
+            _internal_get_ffmpeg_cmd(a)
         return
-    if len(sys.argv) == 2 and sys.argv[1] not in handler_map and not sys.argv[1].startswith('-'):
-        if (CHANNELS_DIR / sys.argv[1]).is_dir(): sys.argv.insert(1, 'status')
-        else: print_error(f"Channel '{sys.argv[1]}' tidak ditemukan."); sys.exit(1)
-    p_start = subparsers.add_parser('start', help='Mulai stream. Contoh: ytlive start <channel>'); p_start.add_argument('channel')
-    p_stop = subparsers.add_parser('stop', help='Hentikan stream. Contoh: ytlive stop <channel>'); p_stop.add_argument('channel')
-    p_list = subparsers.add_parser('list', help='Tampilkan status semua channel.')
-    p_timer = subparsers.add_parser('timer', help='Tampilkan detail jadwal timer systemd.')
-    p_status = subparsers.add_parser('status', help='Tampilkan status detail. Contoh: ytlive status <channel>'); p_status.add_argument('channel')
-    p_create = subparsers.add_parser('create', help='Buat channel baru. Contoh: ytlive create <channel>'); p_create.add_argument('channel')
-    p_delete = subparsers.add_parser('delete', help='Hapus channel. Contoh: ytlive delete <channel>'); p_delete.add_argument('channel')
-    p_log = subparsers.add_parser('log', help='Tampilkan log realtime. Contoh: ytlive log <channel>'); p_log.add_argument('channel')
-    p_debug = subparsers.add_parser('debug', help='Tampilkan log realtime systemd. Contoh: ytlive debug <channel>'); p_debug.add_argument('channel')
-    p_schedule = subparsers.add_parser('schedule', help='Jadwalkan stream. Contoh: ytlive schedule <channel> 08:00 [22:00]'); p_schedule.add_argument('channel'); p_schedule.add_argument('start_time'); p_schedule.add_argument('stop_time', nargs='?', default=None)
-    p_unschedule = subparsers.add_parser('unschedule', help='Hapus jadwal. Contoh: ytlive unschedule <channel>'); p_unschedule.add_argument('channel')
-    p_clean = subparsers.add_parser('clean', help='Bersihkan file sementara. Contoh: ytlive clean all'); p_clean.add_argument('channel')
-    p_lifetime = subparsers.add_parser('lifetime', help='Jadikan stream permanen. Contoh: ytlive lifetime <channel>'); p_lifetime.add_argument('channel')
+
+    # Shortcut: ytlive <channel>
+    if len(sys.argv) == 2 and sys.argv[1] not in handler_map and not sys.argv[1].startswith("-"):
+        if (CHANNELS_DIR / sys.argv[1]).is_dir():
+            sys.argv.insert(1, "status")
+        else:
+            print_error(f"Channel '{sys.argv[1]}' tidak ditemukan.")
+            sys.exit(1)
+
+    p = subparsers.add_parser("start");      p.add_argument("channel")
+    p = subparsers.add_parser("stop");       p.add_argument("channel")
+    subparsers.add_parser("list")
+    subparsers.add_parser("timer")
+    p = subparsers.add_parser("status");     p.add_argument("channel")
+    p = subparsers.add_parser("create");     p.add_argument("channel")
+    p = subparsers.add_parser("delete");     p.add_argument("channel")
+    p = subparsers.add_parser("log");        p.add_argument("channel")
+    p = subparsers.add_parser("debug");      p.add_argument("channel")
+    p = subparsers.add_parser("schedule");   p.add_argument("channel"); p.add_argument("start_time"); p.add_argument("stop_time", nargs="?", default=None)
+    p = subparsers.add_parser("unschedule"); p.add_argument("channel")
+    p = subparsers.add_parser("clean");      p.add_argument("channel")
+    p = subparsers.add_parser("lifetime");   p.add_argument("channel")
+
     for name, func in handler_map.items():
-        if name in subparsers.choices: subparsers.choices[name].set_defaults(func=func)
+        if name in subparsers.choices:
+            subparsers.choices[name].set_defaults(func=func)
+
     if len(sys.argv) == 1:
-        parser.print_help(); print("\n" + "="*20 + " STATUS CHANNEL SAAT INI " + "="*20); handle_list(None); sys.exit(0)
+        parser.print_help()
+        print("\n" + "="*20 + " STATUS CHANNEL SAAT INI " + "="*20)
+        handle_list(None)
+        sys.exit(0)
+
     args = parser.parse_args()
     args.func(args)
 
@@ -474,11 +587,10 @@ if __name__ == "__main__":
     main()
 EOF
 
-chmod +x "${PYTHON_SCRIPT_PATH}" || { log_error "Gagal membuat skrip Python dapat dieksekusi."; exit 1; }
-log_info "Skrip Python berhasil ditempatkan."
+chmod +x "${PYTHON_SCRIPT_PATH}" || log_error "Gagal membuat skrip Python dapat dieksekusi."
 
 log_info "==================================================="
-log_info "     YTLIVE STREAMER SETUP COMPLETE (v28)!"
+log_info "   YTLIVE STREAMER SETUP COMPLETE (v30 - STABIL)"
 log_info "==================================================="
-log_info "Perbaikan: Aspect Ratio (16:9) Fix + Anti Segfault."
-log_info "Silakan restart stream Anda: ytlive lifetime RosaBauer"
+log_info "Gunakan: ytlive create <channel>, isi stream_key.txt,"
+log_info "lalu ytlive lifetime <channel> atau ytlive start <channel>."
