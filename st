@@ -24,7 +24,7 @@ log_error() { echo -e "\e[31m[ERROR]\e[0m $1"; exit 1; }
 log_info "Mengatur zona waktu dan memperbarui paket..."
 timedatectl set-timezone Asia/Jakarta || log_warn "Gagal mengatur zona waktu."
 apt-get update -y >/dev/null || log_error "Gagal memperbarui daftar paket."
-apt-get install -y python3 python3-pip wget tar xz-utils acl policykit-1 logrotate || log_error "Gagal menginstal dependensi."
+apt-get install -y python3 python3-pip wget tar xz-utils acl polkitd logrotate || log_error "Gagal menginstal dependensi."
 pip3 install psutil requests || log_error "Gagal menginstal psutil/requests."
 
 # --- 2. Pembaruan Komponen Skrip (Jadwal & Stream Aman) ---
