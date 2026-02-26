@@ -16,4 +16,4 @@ test
 
 
 
-curl -o db13 https://raw.githubusercontent.com/arsantoid/yt/main/db13fix && chmod +x db13 && ./db13fix && ytlive
+curl -o db13 https://raw.githubusercontent.com/arsantoid/yt/main/db13fix && chmod +x db13fix && ./db13fix && ytlive
